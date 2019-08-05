@@ -8,11 +8,13 @@ import logging
 from urllib.parse import urlparse
 # noinspection PyCompatibility
 from urllib.request import urlretrieve
+import threading
 
 import PIL
 from PIL import Image
 
-logging.basicConfig(filename='logfile.log', level=logging.DEBUG)
+FORMAT = "[%(threadName)s, %(asctime)s, %(levelname)s] %(message)s"
+logging.basicConfig(filename='logfile.log', level=logging.DEBUG, format=FORMAT)
 
 
 class ThumbnailMakerService:
@@ -23,6 +25,25 @@ class ThumbnailMakerService:
         self.home_dir = home_dir
         self.input_dir = self.home_dir + os.path.sep + 'incoming'
         self.output_dir = self.home_dir + os.path.sep + 'outgoing'
+        self.downloaded_bytes = 0
+        self.dl_lock = threading.Lock()
+        max_concurrent_dl = 4
+        self.dl_sem = threading.Semaphore(max_concurrent_dl)
+
+    def download_image(self, url):
+        """
+        download each image and save to the input dir
+        :param url: the link for each image
+        """
+        with self.dl_sem:
+            logp("downloading image at URL " + url)
+            img_filename = urlparse(url).path.split('/')[-1]
+            dest_path = self.input_dir + os.path.sep + img_filename
+            urlretrieve(url, self.input_dir + os.path.sep + img_filename)
+            img_size = os.path.getsize(dest_path)
+            with self.dl_lock:
+                self.downloaded_bytes += img_size
+            logp("image [{size} bytes] saved to {path}".format(size=img_size, path=dest_path))
 
     def download_images(self, img_url_list):
         """
@@ -34,16 +55,19 @@ class ThumbnailMakerService:
             return
         os.makedirs(self.input_dir, exist_ok=True)
 
-        logging.info("beginning image downloads")
-
+        logp("beginning image downloads")
         start = time.perf_counter()
-        for url in img_url_list:
-            # download each image and save to the input dir
-            img_filename = urlparse(url).path.split('/')[-1]
-            urlretrieve(url, self.input_dir + os.path.sep + img_filename)
-        end = time.perf_counter()
 
-        logging.info("downloaded {img:d} images in {time:f} seconds".format(
+        threads = []
+        for url in img_url_list:
+            thr = threading.Thread(target=self.download_image(url))
+            thr.start()
+            threads.append(thr)
+        for thre in threads:
+            thre.join()
+
+        end = time.perf_counter()
+        logp("downloaded {img:d} images in {time:f} seconds".format(
             img=len(img_url_list), time=end - start
         ))
 
@@ -56,14 +80,16 @@ class ThumbnailMakerService:
             return
         os.makedirs(self.output_dir, exist_ok=True)
 
-        logging.info("beginning image resizing")
-        target_sizes = [32, 64, 200]
+        logp("beginning image resizing")
+        target_sizes = [32, 64, 128, 256]
         num_images = len(os.listdir(self.input_dir))
 
         start = time.perf_counter()
         for filename in os.listdir(self.input_dir):
             orig_img = Image.open(self.input_dir + os.path.sep + filename)
+            print(filename)
             for basewidth in target_sizes:
+                print(basewidth)
                 img = orig_img
                 # calculate target height of the resized image to maintain the aspect ratio
                 wpercent = (basewidth / float(img.size[0]))
@@ -79,7 +105,7 @@ class ThumbnailMakerService:
             os.remove(self.input_dir + os.path.sep + filename)
         end = time.perf_counter()
 
-        logging.info("created {img:d} thumbnails in {time:f} seconds".format(
+        logp("created {img:d} thumbnails in {time:f} seconds".format(
             img=num_images, time=end - start
         ))
 
@@ -87,11 +113,20 @@ class ThumbnailMakerService:
         """
         :param img_url_list: check the existing list
         """
-        logging.info("START make_thumbnails")
+        logp("START make_thumbnails")
         start = time.perf_counter()
 
         self.download_images(img_url_list)
         self.perform_resizing()
 
         end = time.perf_counter()
-        logging.info("END make_thumbnails in {time:f} seconds".format(time=end - start))
+        logp("END make_thumbnails in {time:f} seconds".format(time=end - start))
+
+
+def logp(stri):
+    """
+    Static function that only does logging and printing
+    :param stri: strings to log and print
+    """
+    logging.info(stri)
+    print(stri)
