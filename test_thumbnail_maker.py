@@ -57,4 +57,5 @@ def test_thumbnail_maker():
 
 
 if __name__ == '__main__':
+    # Run this code without pytest
     test_thumbnail_maker()
