@@ -8,7 +8,10 @@ import logging
 from urllib.parse import urlparse
 # noinspection PyCompatibility
 from urllib.request import urlretrieve
+# noinspection PyCompatibility
+from queue import Queue, Empty
 import threading
+from threading import Thread
 
 import PIL
 from PIL import Image
@@ -25,25 +28,30 @@ class ThumbnailMakerService:
         self.home_dir = home_dir
         self.input_dir = self.home_dir + os.path.sep + 'incoming'
         self.output_dir = self.home_dir + os.path.sep + 'outgoing'
-        self.downloaded_bytes = 0
         self.dl_lock = threading.Lock()
         max_concurrent_dl = 4
         self.dl_sem = threading.Semaphore(max_concurrent_dl)
+        self.img_queue = Queue()
+        self.dl_queue = Queue()
 
-    def download_image(self, url):
+    def download_image(self):
         """
-        download each image and save to the input dir
-        :param url: the link for each image
+        Download each image and save to the input dir
         """
-        with self.dl_sem:
-            logp("downloading image at URL " + url)
-            img_filename = urlparse(url).path.split('/')[-1]
-            dest_path = self.input_dir + os.path.sep + img_filename
-            urlretrieve(url, self.input_dir + os.path.sep + img_filename)
-            img_size = os.path.getsize(dest_path)
-            with self.dl_lock:
-                self.downloaded_bytes += img_size
-            logp("image [{size} bytes] saved to {path}".format(size=img_size, path=dest_path))
+        while not self.dl_queue.empty():
+            try:
+                url = self.dl_queue.get(block=False)
+                logp("Downloading image at URL " + url)
+                img_filename = urlparse(url).path.split('/')[-1]
+                dest_path = self.input_dir + os.path.sep + img_filename
+                urlretrieve(url, self.input_dir + os.path.sep + img_filename)
+                img_size = os.path.getsize(dest_path)
+                self.img_queue.put(img_filename)
+                logp("Image [{size} bytes] saved to {path}.".format(size=img_size, path=dest_path))
+
+                self.dl_queue.task_done()
+            except Empty:
+                logp("Queue empty")
 
     def download_images(self, img_url_list):
         """
@@ -58,16 +66,20 @@ class ThumbnailMakerService:
         logp("beginning image downloads")
         start = time.perf_counter()
 
-        threads = []
         for url in img_url_list:
-            thr = threading.Thread(target=self.download_image(url))
-            thr.start()
-            threads.append(thr)
-        for thre in threads:
-            thre.join()
-
+            # Download each image and save to the input dir
+            logp("Downloading image at URL " + url)
+            img_filename = urlparse(url).path.split('/')[-1]
+            dest_path = self.input_dir + os.path.sep + img_filename
+            urlretrieve(url, self.input_dir + os.path.sep + img_filename)
+            img_size = os.path.getsize(dest_path)
+            self.img_queue.put(img_filename)
+            logp("Image [{size} bytes] saved to {path}.".format(size=img_size, path=dest_path))
         end = time.perf_counter()
-        logp("downloaded {img:d} images in {time:f} seconds".format(
+
+        self.img_queue.put(None)
+
+        logp("Downloaded {img:d} images in {time:f} seconds.".format(
             img=len(img_url_list), time=end - start
         ))
 
@@ -76,36 +88,40 @@ class ThumbnailMakerService:
         validate inputs
         :return: returns nothing if no input
         """
-        if not os.listdir(self.input_dir):
-            return
         os.makedirs(self.output_dir, exist_ok=True)
 
-        logp("beginning image resizing")
+        logp("Beginning image resizing.")
         target_sizes = [32, 64, 128, 256]
         num_images = len(os.listdir(self.input_dir))
 
         start = time.perf_counter()
-        for filename in os.listdir(self.input_dir):
-            orig_img = Image.open(self.input_dir + os.path.sep + filename)
-            print(filename)
-            for basewidth in target_sizes:
-                print(basewidth)
-                img = orig_img
-                # calculate target height of the resized image to maintain the aspect ratio
-                wpercent = (basewidth / float(img.size[0]))
-                hsize = int((float(img.size[1]) * float(wpercent)))
-                # perform resizing
-                img = img.resize((basewidth, hsize), PIL.Image.LANCZOS)
+        while True:
+            filename = self.img_queue.get()
+            if filename:
+                logp("Resizing image {file}.".format(file=filename))
+                orig_img = Image.open(self.input_dir + os.path.sep + filename)
+                for basewidth in target_sizes:
+                    img = orig_img
+                    # calculate target height of the resized image to maintain the aspect ratio
+                    wpercent = (basewidth / float(img.size[0]))
+                    hsize = int((float(img.size[1]) * float(wpercent)))
+                    # perform resizing
+                    img = img.resize((basewidth, hsize), PIL.Image.LANCZOS)
 
-                # save the resized image to the output dir with a modified file name
-                new_filename = os.path.splitext(filename)[0] + \
-                    '_' + str(basewidth) + os.path.splitext(filename)[1]
-                img.save(self.output_dir + os.path.sep + new_filename)
+                    # save the resized image to the output dir with a modified file name
+                    new_filename = os.path.splitext(filename)[0] + \
+                        '_' + str(basewidth) + os.path.splitext(filename)[1]
+                    img.save(self.output_dir + os.path.sep + new_filename)
 
-            os.remove(self.input_dir + os.path.sep + filename)
+                os.remove(self.input_dir + os.path.sep + filename)
+                logp("Done resizing image {file}.".format(file=filename))
+                self.img_queue.task_done()
+            else:
+                self.img_queue.task_done()
+                break
+
         end = time.perf_counter()
-
-        logp("created {img:d} thumbnails in {time:f} seconds".format(
+        logp("Created {img:d} thumbnails in {time:f} seconds.".format(
             img=num_images, time=end - start
         ))
 
@@ -116,8 +132,20 @@ class ThumbnailMakerService:
         logp("START make_thumbnails")
         start = time.perf_counter()
 
-        self.download_images(img_url_list)
-        self.perform_resizing()
+        for img_url in img_url_list:
+            self.dl_queue.put(img_url)
+
+        num_dl_threads = 4
+        for _ in range(num_dl_threads):
+            thr = Thread(target=self.download_image)
+            thr.start()
+
+        t_2 = Thread(target=self.perform_resizing)
+        t_2.start()
+
+        self.dl_queue.join()
+        self.img_queue.put(None)
+        t_2.join()
 
         end = time.perf_counter()
         logp("END make_thumbnails in {time:f} seconds".format(time=end - start))
