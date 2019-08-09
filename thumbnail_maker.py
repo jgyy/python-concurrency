@@ -10,7 +10,6 @@ from urllib.parse import urlparse
 from urllib.request import urlretrieve
 # noinspection PyCompatibility
 from queue import Queue, Empty
-import threading
 from threading import Thread
 import multiprocessing
 
@@ -39,12 +38,13 @@ class ThumbnailMakerService:
         while not dl_queue.empty():
             try:
                 url = dl_queue.get(block=False)
-                logp("Downloading image at URL " + url)
-                img_filename = urlparse(url).path.split('/')[-1]
-                dest_path = self.input_dir + os.path.sep + img_filename
-                urlretrieve(url, self.input_dir + os.path.sep + img_filename)
+                logp("Downloading image at URL {url}".format(url=url))
+                img_file_name = urlparse(url)
+                img_file_name = img_file_name.path.split('/')[-1]
+                dest_path = "{}{}{}".format(self.input_dir, os.path.sep, img_file_name)
+                urlretrieve(url, self.input_dir + os.path.sep + img_file_name)
                 img_size = os.path.getsize(dest_path)
-                self.img_list.append(img_filename)
+                self.img_list.append(img_file_name)
                 logp("Image [{size} bytes] saved to {path}.".format(size=img_size, path=dest_path))
 
                 dl_queue.task_done()
@@ -89,30 +89,33 @@ class ThumbnailMakerService:
         os.makedirs(self.output_dir, exist_ok=True)
 
         logp("Beginning image resizing.")
-        target_sizes = [32, 64, 128, 256]
+        resolutions = [32, 64, 128, 256]
         num_images = len(os.listdir(self.input_dir))
 
         start = time.perf_counter()
         while True:
-            filename = self.img_list[0]
-            if filename:
-                logp("Resizing image {file}.".format(file=filename))
-                orig_img = Image.open(self.input_dir + os.path.sep + filename)
-                for basewidth in target_sizes:
-                    img = orig_img
-                    # calculate target height of the resized image to maintain the aspect ratio
-                    wpercent = (basewidth / float(img.size[0]))
-                    hsize = int((float(img.size[1]) * float(wpercent)))
-                    # perform resizing
-                    img = img.resize((basewidth, hsize), PIL.Image.LANCZOS)
+            file_name = self.img_list[0]
+            if file_name:
+                logp("Resizing image {}.".format(file_name))
+                orig_img = Image.open("{}{}{}".format(self.input_dir, os.path.sep, file_name))
+                for base_width in resolutions:
+                    image = orig_img
+                    print("calculate target height of resized image to maintain the aspect ratio")
+                    w_percent = base_width / float(image.size[0])
+
+                    print("perform resizing")
+                    image = image.resize(
+                        (base_width, int(float(image.size[1]) * float(w_percent))),
+                        PIL.Image.LANCZOS
+                    )
 
                     # save the resized image to the output dir with a modified file name
-                    new_filename = os.path.splitext(filename)[0] + \
-                        '_' + str(basewidth) + os.path.splitext(filename)[1]
-                    img.save(self.output_dir + os.path.sep + new_filename)
+                    new_filename = os.path.splitext(file_name)[0] + \
+                        '_' + str(base_width) + os.path.splitext(file_name)[1]
+                    image.save(self.output_dir + os.path.sep + new_filename)
 
-                os.remove(self.input_dir + os.path.sep + filename)
-                logp("Done resizing image {file}.".format(file=filename))
+                os.remove(self.input_dir + os.path.sep + file_name)
+                logp("Done resizing image {file}.".format(file=file_name))
                 print(self.img_list)
             else:
                 print(self.img_list)
@@ -140,11 +143,12 @@ class ThumbnailMakerService:
             img = img.resize((basewidth, hsize), PIL.Image.LANCZOS)
 
             # save the resized image to the output dir with a modified file name
-            new_filename = os.path.splitext(filename)[0] + '_' + str(basewidth) + os.path.splitext(filename)[1]
+            new_filename = os.path.splitext(filename)[0] + '_' + str(basewidth) + \
+                os.path.splitext(filename)[1]
             img.save(self.output_dir + os.path.sep + new_filename)
 
         os.remove(self.input_dir + os.path.sep + filename)
-        logp("Done resizing image {file}.".format(file = filename))
+        logp("Done resizing image {file}.".format(file=filename))
 
     def make_thumbnails(self, img_url_list):
         """
